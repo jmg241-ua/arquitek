@@ -127,11 +127,17 @@ function callDeepSeek(messages) {
 }
 
 // ─── Excel helpers ────────────────────────────────────────────────────────
-function saveExcel(wb, prefix) {
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const fileName = prefix + '_' + ts + '.xlsx';
-  const filePath = path.join(OUTPUT_DIR, fileName);
-  return wb.xlsx.writeFile(filePath).then(() => fileName);
+function generateUniqueName(base, ext) {
+  let name = base + ext;
+  if (!fs.existsSync(path.join(OUTPUT_DIR, name))) return name;
+  let v = 1;
+  while (fs.existsSync(path.join(OUTPUT_DIR, base + '_v' + v + ext))) v++;
+  return base + '_v' + v + ext;
+}
+
+function saveExcel(wb, baseName) {
+  const filePath = path.join(OUTPUT_DIR, baseName);
+  return wb.xlsx.writeFile(filePath).then(() => baseName);
 }
 
 const BLUE_FONT = { color: { argb: 'FF0070C0' } };
@@ -196,7 +202,7 @@ function matchPartida(budgetCode, partidas) {
 }
 
 // ─── /budget logic ─────────────────────────────────────────────────────
-async function processBudget(text) {
+async function processBudget(text, originalFilename) {
   const result = await callDeepSeek([
     {
       role: "system",
@@ -257,7 +263,14 @@ async function processBudget(text) {
   // Freeze panes: freeze first 6 cols (A-F) and first 2 rows
   ws.views = [{ state: 'frozen', xSplit: 6, ySplit: 2 }];
 
-  const fileName = await saveExcel(wb, 'presupuesto');
+  let pdfBase = 'presupuesto';
+  if (originalFilename) {
+    pdfBase = path.basename(originalFilename).replace(/\.pdf$/i, '').replace(/[^a-zA-Z0-9_ -]/g, '_').trim();
+    if (!pdfBase) pdfBase = 'presupuesto';
+  }
+  pdfBase = 'presupuesto_' + pdfBase;
+  const fileName = generateUniqueName(pdfBase, '.xlsx');
+  await saveExcel(wb, fileName);
   return {
     success: true,
     tipo: 'Presupuesto',
@@ -344,13 +357,11 @@ async function processCert(text, budgetFileName) {
     // Merge label across all 6 cols  
     ws.mergeCells(1, sc, 1, sc + 5);
     ws.getCell(1, sc).alignment = { horizontal: 'center', vertical: 'middle' };
-    const colLabels = ['', 'Can', 'Imp', 'CompCan', 'CompImp', '%'];
+    const colLabels = ['Can', 'Imp', 'CompCan', 'CompImp', '%'];
     for (let i = 0; i < colLabels.length; i++) {
-      if (colLabels[i]) {
-        const cell = ws.getCell(1, sc + i);
-        cell.value = colLabels[i];
-        styleCertHeader(cell);
-      }
+      const cell = ws.getCell(1, sc + i);
+      cell.value = colLabels[i];
+      styleCertHeader(cell);
     }
     // Data starts at row 2
     const lastRow = ws.rowCount;
@@ -380,14 +391,12 @@ async function processCert(text, budgetFileName) {
     styleCertHeader(labelCell);
     labelCell.alignment = { horizontal: 'center', vertical: 'middle' };
 
-    // Row 2: column names (empty at sc, then Can, Imp, CompCan, CompImp, %)
-    const colLabels = ['', 'Can', 'Imp', 'CompCan', 'CompImp', '%'];
+    // Row 2: column names (Can, Imp, CompCan, CompImp, %)
+    const colLabels = ['Can', 'Imp', 'CompCan', 'CompImp', '%'];
     for (let i = 0; i < colLabels.length; i++) {
-      if (colLabels[i]) {
-        const cell = ws.getCell(2, sc + i);
-        cell.value = colLabels[i];
-        styleCertHeader(cell);
-      }
+      const cell = ws.getCell(2, sc + i);
+      cell.value = colLabels[i];
+      styleCertHeader(cell);
     }
 
     // Rows 3+: cert data values
@@ -417,8 +426,15 @@ async function processCert(text, budgetFileName) {
     }
   }
 
-  const baseName = path.basename(budgetFileName, '.xlsx');
-  const newFile = await saveExcel(wb, baseName);
+  // Derive base name from budget file, strip _cXX and _vX suffixes
+  let budgetBase = path.basename(budgetFileName, '.xlsx')
+    .replace(/^presupuesto_/, '')
+    .replace(/_(c\d+)/g, '')
+    .replace(/_(v\d+)$/, '')
+    .replace(/_+$/, '');
+  const certNum = certInfo.label.replace('Certif ', '');
+  const newFile = generateUniqueName('presupuesto_' + budgetBase + '_c' + certNum, '.xlsx');
+  await saveExcel(wb, newFile);
   return {
     success: true,
     tipo: 'Certificación',
@@ -612,7 +628,7 @@ const server = http.createServer(async (req, res) => {
     }
     const text = readPdfFromFile(storagePath);
     if (pathname === '/budget') {
-      const result = await processBudget(text);
+      const result = await processBudget(text, null);
       res.end(JSON.stringify(result));
     } else {
       const budgetFile = parsed.query.budgetFile || findLatestExcel();
@@ -646,7 +662,7 @@ const server = http.createServer(async (req, res) => {
       try {
         const text = readPdfFromBuffer(filePart.content);
         if (pathname === '/upload/budget') {
-          const result = await processBudget(text);
+          const result = await processBudget(text, filePart.filename);
           msg = result.success
             ? '✅ Presupuesto procesado correctamente.<br>' + result.num_partidas + ' partidas extraídas. Archivo: ' + result.archivo
             : '❌ Error: ' + (result.error || 'desconocido');
