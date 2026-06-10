@@ -89,7 +89,7 @@ Las filas pueden ser:
 ├── docker-compose.yml              # n8n (5678) + proxy (3456) con Dockerfile
 ├── .env                            # N8N_HOST, DEEPSEEK_API_KEY
 ├── proxy-server/
-│   ├── Dockerfile                  # Construye imagen con Tesseract OCR + xlsx
+│   ├── Dockerfile                  # Construye imagen con Tesseract OCR + exceljs
 │   ├── server.js                   # Proxy con endpoints /budget y /cert
 │   └── package.json                # exceljs
 ├── workflows/
@@ -135,9 +135,20 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 5. Guarda el Excel actualizado
 6. Responde `{ success, certLabel, numPartidas, excelFile, appendedTo }`
 
+### Esquema de nombrado de archivos
+
+Los Excel generados siguen este patrón:
+
+- **Presupuesto base**: `presupuesto_[NOMBRE_PDF].xlsx`
+- **Presupuesto + Cert 1**: `presupuesto_[NOMBRE]_c01.xlsx`
+- **Presupuesto + Cert 2**: `presupuesto_[NOMBRE]_c02.xlsx` (incremental sobre el `_c01`)
+- **Duplicados**: si el nombre ya existe se añade `_v1`, `_v2`, etc. Ej: `presupuesto_miobra_v1.xlsx`
+
+`[NOMBRE_PDF]` se extrae del nombre original del PDF subido.
+
 ## Estado actual
 
-### ✅ Funcionando
+### Funcionando
 - **Interfaz web** en `http://localhost:3456` — subir PDFs, ver y descargar Excel generados
 - Proxy server con endpoints `/budget` y `/cert`:
   - **`/upload/budget`**: sube PDF, extrae texto (OCR si escaneado), llama DeepSeek, crea Excel A-F
@@ -146,7 +157,7 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 - n8n 2.25.6 con workflow alternativo para certificaciones
 - Webhook en modo `onReceived`
 
-### 🔧 Últimas mejoras
+### Últimas mejoras
 | Mejora | Descripción |
 |---|---|
 | **Migración a exceljs** | Se reemplazó `xlsx` por `exceljs` para soporte de estilos: color azul, celdas fusionadas, paneles congelados. |
@@ -157,7 +168,7 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 | **Detección OCR mejorada** | `isLikelyScanned` comprueba objetos `BT`/`ET` antes de decidir aplicar OCR. |
 | **Emparejamiento difuso de partidas** | `matchPartida()` prueba exacto → prefijo → prefijo inverso. |
 
-### ⚠️ Limitaciones
+### Limitaciones
 | Limitación | Detalle |
 |---|---|
 | **OCR lento** | Para PDFs escaneados, la conversión pdftoppm + tesseract puede tardar varios minutos. |
@@ -165,7 +176,7 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 | **Code node sandbox** | No permite `http`, `https`, `fs`, `fetch`, `child_process`, `process.env`, `$env`, módulos npm externos. Solo `buffer`, `path`, `crypto`, `stream`, `url`, `util`, `zlib`. |
 | **Execute Command node** | No disponible en esta versión de n8n. |
 
-### 🔜 Próximos pasos
+### Próximos pasos
 1. Indicador de progreso en la interfaz web (barra de carga durante OCR/DeepSeek)
 2. Mejorar emparejamiento de capítulos y totales
 3. Manejo de errores (timeouts, reintentos DeepSeek)
@@ -221,7 +232,7 @@ curl -X POST "http://localhost:5678/webhook/cert-080640" \
 ## Notas técnicas
 
 - La API key de DeepSeek se pasa al proxy via `DEEPSEEK_API_KEY` en docker-compose.
-- El proxy se construye con Dockerfile (Tesseract OCR + xlsx pre-instalados).
+- El proxy se construye con Dockerfile (Tesseract OCR + exceljs pre-instalados).
 - Al modificar `proxy-server/server.js`, reconstruir con `docker compose up -d --build proxy`.
 - Los PDFs se procesan directamente en el proxy (sin pasar por n8n) cuando se usa la interfaz web.
 - El endpoint `/cert` y `/upload/cert` buscan el Excel de presupuesto más reciente en `/output/` para añadir columnas.
