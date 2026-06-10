@@ -78,17 +78,18 @@ Las filas pueden ser:
 ```
 
 ```
-├── docker-compose.yml              # n8n (5678) + proxy (3456)
+├── docker-compose.yml              # n8n (5678) + proxy (3456) con Dockerfile
 ├── .env                            # N8N_HOST, DEEPSEEK_API_KEY
 ├── proxy-server/
-│   ├── server.js                   # Proxy PDF→texto→DeepSeek→Excel
+│   ├── Dockerfile                  # Construye imagen con Tesseract OCR + xlsx
+│   ├── server.js                   # Proxy con endpoints /budget y /cert
 │   └── package.json                # xlsx
 ├── workflows/
 │   ├── 01-importar-contrato.json   # Workflow contrato (pendiente)
-│   └── certificacion-pdf-a-excel.json
+│   └── certificacion-pdf-a-excel.json  # Workflow certificación activo
 ├── ejemplo-real/                   # PDFs y Excel de ejemplo
-│   ├── GEANSAR DOC-20230525-WA0005..pdf          # Presupuesto inicial
-│   ├── CERTIFICACION Nº4 LIQUIDACION NUEVA AVENIDA.pdf  # Certif mes
+│   ├── GEANSAR DOC-20230525-WA0005..pdf          # Presupuesto inicial (escaneado)
+│   ├── CERTIFICACION Nº4 LIQUIDACION NUEVA AVENIDA.pdf  # Certificación mensual
 │   └── NUEVA AVENIDA COMPROBACION CERT 04 v02.xlsx      # Excel esperado
 ├── test-envio.sh
 ├── output/                         # Excel generados (volumen Docker)
@@ -98,51 +99,58 @@ Las filas pueden ser:
 ### Workflow n8n (3 nodos)
 
 ```
-[Webhook] ──→ [Code: Preparar] ──→ [HTTP Request: Proxy]
+[Webhook] ──→ [Code: Preparar] ──→ [HTTP Request: Proxy /cert]
 ```
 
 1. **Webhook** — Recibe el PDF vía `POST /webhook/cert-XXXXXX` con `multipart/form-data`. Responde `{"message":"Workflow was started"}` inmediatamente.
-2. **Code** — Extrae el `binaryId` del archivo recibido y construye la URL del proxy: `http://arquitek-proxy:3456/?binaryId=filesystem-v2:...`
-3. **HTTP Request** — Hace GET al proxy. El proxy (fuera del sandbox de n8n) lee el PDF del disco compartido, llama a DeepSeek, genera el Excel y lo guarda en `/output`.
+2. **Code** — Extrae el `binaryId` del archivo recibido y construye la URL del proxy: `http://arquitek-proxy:3456/cert?binaryId=filesystem-v2:...`
+3. **HTTP Request** — Hace GET al proxy `/cert`. El proxy (fuera del sandbox de n8n) lee el PDF del disco compartido, llama a DeepSeek, añade columnas al Excel del presupuesto y guarda en `/output`.
 
 ### Proxy server (`proxy-server/server.js`)
 
-Servicio Node.js 20 que corre como contenedor separado. Recibe un `binaryId` vía query param y:
+Servicio Node.js 20 que corre como contenedor separado. Expone dos endpoints que reciben un `binaryId` vía query param:
 
-1. **Lee el archivo binario** del volumen compartido `n8n_data` (montado en `/n8n-storage`)
-   - `binaryId: "filesystem-v2:workflows/.../binary_data/..."`
-   - Path real: `/n8n-storage/storage/workflows/.../binary_data/...`
-2. **Extrae texto** del PDF mediante raw buffer parsing (expresiones regulares sobre contenido `(...)` en el PDF)
-   - ⚠️ Solo funciona con PDFs de texto incrustado, no escaneados/comprimidos
-3. **Llama a DeepSeek API** vía `https` (módulo Node estándar) con el texto extraído
-   - Prompt: extraer datos estructurados de la certificación
-   - `response_format: {type: "json_object"}`
-4. **Genera Excel** con la librería `xlsx` y lo guarda en `/output/certificacion_*.xlsx`
-5. **Responde** a n8n con `{ success, textLength, aiResponse, excelFile }`
+#### `GET /budget?binaryId=...`
+Procesa un PDF de **presupuesto** (el punto de partida de la obra):
+1. Lee el archivo binario del volumen compartido `n8n_data`
+2. Extrae texto del PDF — dos métodos: raw parsing para PDFs con texto incrustado, OCR con `pdftoppm` + `tesseract` (español) para PDFs escaneados
+3. Llama a DeepSeek con un prompt específico para extraer todas las partidas del presupuesto
+4. Genera un Excel con columnas **A-F**: Código, Ud, Resumen, CanPres, PrPres, ImpPres
+5. Responde `{ success, numPartidas, excelFile }`
+
+#### `GET /cert?binaryId=...`
+Procesa un PDF de **certificación mensual** y añade columnas al Excel del presupuesto existente:
+1. Lee el PDF, extrae texto (igual que /budget)
+2. Llama a DeepSeek con prompt específico para extraer datos de certificación y el array `partidas` con `{ codigo, can, imp }`
+3. Busca el Excel de presupuesto más reciente en `/output/`
+4. Añade columnas de certificación (Can, Imp, CompCan, CompImp, %) emparejando por código de partida
+5. Guarda el Excel actualizado
+6. Responde `{ success, certLabel, numPartidas, excelFile, appendedTo }`
 
 ## Estado actual
 
 ### ✅ Funcionando
 - n8n 2.25.6 en Docker con SQLite
-- Proxy server operativo: lee PDFs, llama DeepSeek, genera Excel
+- Proxy server con dos endpoints:
+  - **`/budget`**: extrae presupuesto desde PDF (con OCR), crea Excel base con columnas A-F
+  - **`/cert`**: extrae certificación desde PDF, añade columnas al Excel del presupuesto existente
+- Detección automática de PDFs escaneados → OCR con Tesseract (español)
 - Workflow **Certificacion PDF a Excel**: 3 nodos ejecutándose correctamente
-- Excel se genera en `./output/`
 - Webhook en modo `onReceived` (respuesta inmediata)
 
 ### ⚠️ Limitaciones
 | Limitación | Detalle |
 |---|---|
-| **PDF escaneados** | El raw buffer parsing solo extrae texto de PDFs con texto incrustado. PDFs escaneados/comprimidos (como GEANSAR) no se pueden procesar sin OCR. |
+| **OCR lento** | Para PDFs escaneados, la conversión pdftoppm + tesseract puede tardar varios minutos. |
 | **HTTP Request node POST** | Bug en typeVersion 4.2: `jsonBody` con arrays los elimina. Solución: GET con query param. |
 | **Code node sandbox** | No permite `http`, `https`, `fs`, `fetch`, `child_process`, `process.env`, `$env`, módulos npm externos. Solo `buffer`, `path`, `crypto`, `stream`, `url`, `util`, `zlib`. |
 | **Execute Command node** | No disponible en esta versión de n8n. |
-| **Proxy: flujo completo** | Pendiente: el proxy actual crea Excel desde cero. Falta implementar: leer Excel existente + añadir columnas de nueva certificación. |
 
 ### 🔜 Próximos pasos
-1. Actualizar el proxy para que reciba el Excel existente (binaryId o file path) junto con el nuevo PDF de certificación
-2. Leer el Excel maestro, añadir columnas de la nueva certificación (en azul)
-3. Guardar el Excel actualizado
-4. Workflow de contrato (presupuesto inicial desde PDF)
+1. Workflow de n8n para presupuesto inicial (Webhook → Code → `/budget`)
+2. Añadir formato azul a las columnas nuevas de certificación en el Excel
+3. Mejorar el emparejamiento de partidas entre certificación y presupuesto (actualmente por código exacto)
+4. Mejorar el header del Excel a dos filas (grupo de certificación + nombre de columna)
 
 ## Requisitos
 
