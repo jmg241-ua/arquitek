@@ -1,0 +1,209 @@
+{
+  "name": "01 - Importar Contrato PDF a Excel",
+  "nodes": [
+    {
+      "id": "w-node-1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "webhookId": "contrato-webhook",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "contrato",
+        "options": {}
+      }
+    },
+    {
+      "id": "w-node-2",
+      "name": "Extraer PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [280, 300],
+      "parameters": {
+        "operation": "extractFromFile",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "w-node-3",
+      "name": "Preparar prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 300],
+      "parameters": {
+        "jsCode": "const pdfText = $input.first().json.text;\n\nconst systemPrompt = `Eres un asistente experto en extraer datos de presupuestos de construccion (contratos de obra) a partir del texto extraido de un PDF.\n\nEl PDF contiene el PRESUPUESTO/CONTRATO original de una obra. Debes extraer todas las partidas (items) con sus datos.\n\nResponde UNICAMENTE con un objeto JSON con esta estructura EXACTA:\n{\n  \"proyecto\": \"Nombre del proyecto\",\n  \"contratista\": \"Nombre del contratista\",\n  \"fecha\": \"Fecha del presupuesto\",\n  \"items\": [\n    {\n      \"codigo\": \"Codigo jerarquico (ej: 1, 1.1, 2, 2.3, 2.3.1)\",\n      \"unidad\": \"Unidad de medida (Ud, M, M2, M3, ML, PA, US, %)\",\n      \"descripcion\": \"Descripcion completa de la partida\",\n      \"cantidad\": 0.00,\n      \"precio_unitario\": 0.00,\n      \"importe\": 0.00\n    }\n  ],\n  \"total_presupuesto\": 0.00\n}\n\nREGLAS:\n- codigo: usa el numero de partida exacto del PDF (ej: 1, 1.1, 2.3.1)\n- unidad: normaliza a unidades estandar\n- cantidad: la cantidad presupuestada\n- Las secciones/categorias (como \"MEDIOS AUXILIARES\", \"DEMOLICIONES\") extraelas como items con solo codigo y descripcion (sin unidad, cantidad ni precio)\n- Extrae TODOS los items, no omitas ninguno\n- Los numeros deben ser valores numericos, NO strings\n- Si un campo no existe, usa null`;\n\nreturn [{\n  systemPrompt,\n  pdfText\n}];"
+      }
+    },
+    {
+      "id": "w-node-4",
+      "name": "DeepSeek API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "none",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "deepseek-v4-flash"
+            },
+            {
+              "name": "messages",
+              "value": "={{ [\n  { role: 'system', content: $json.systemPrompt },\n  { role: 'user', content: $json.pdfText }\n] }}"
+            },
+            {
+              "name": "response_format",
+              "value": "={{ { type: 'json_object' } }}"
+            },
+            {
+              "name": "temperature",
+              "value": 0.05
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.DEEPSEEK_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "w-node-5",
+      "name": "Generar filas Excel",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst content = JSON.parse(body.choices[0].message.content);\n\nconst rows = [];\n\n// Info del proyecto\nrows.push({\n  A: 'PROYECTO:',\n  B: content.proyecto || ''\n});\nrows.push({\n  A: 'CONTRATISTA:',\n  B: content.contratista || ''\n});\nrows.push({\n  A: 'FECHA:',\n  B: content.fecha || ''\n});\nrows.push({});\n\n// Cabeceras\nrows.push({\n  A: 'Codigo',\n  B: 'Ud',\n  C: 'Descripcion',\n  D: 'CanPres',\n  E: 'PrPres',\n  F: 'ImpPres'\n});\n\n// Items\nif (content.items && content.items.length > 0) {\n  for (const item of content.items) {\n    rows.push({\n      A: item.codigo || '',\n      B: item.unidad || '',\n      C: item.descripcion || '',\n      D: item.cantidad ?? '',\n      E: item.precio_unitario ?? '',\n      F: item.importe ?? ''\n    });\n  }\n}\n\n// Total\nrows.push({});\nrows.push({\n  A: 'TOTAL PRESUPUESTO',\n  B: '',\n  C: '',\n  D: '',\n  E: '',\n  F: content.total_presupuesto || ''\n});\n\nreturn rows;"
+      }
+    },
+    {
+      "id": "w-node-6",
+      "name": "Generar Excel",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 1,
+      "position": [1400, 300],
+      "parameters": {
+        "operation": "toFile",
+        "fileFormat": "xlsx",
+        "options": {}
+      }
+    },
+    {
+      "id": "w-node-7",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1680, 300],
+      "parameters": {
+        "respondWith": "binary",
+        "binaryPropertyName": "data",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"contrato.xlsx\""
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extraer PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer PDF": {
+      "main": [
+        [
+          {
+            "node": "Preparar prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar prompt": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek API": {
+      "main": [
+        [
+          {
+            "node": "Generar filas Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar filas Excel": {
+      "main": [
+        [
+          {
+            "node": "Generar Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar Excel": {
+      "main": [
+        [
+          {
+            "node": "Responder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": []
+}

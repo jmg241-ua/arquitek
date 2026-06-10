@@ -1,0 +1,211 @@
+{
+  "name": "📄 Certificacion PDF → Excel",
+  "nodes": [
+    {
+      "id": "w-node-1",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [0, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "upload-certificacion",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "webhookId": "upload-certificacion"
+    },
+    {
+      "id": "w-node-2",
+      "name": "Extraer PDF",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [280, 300],
+      "parameters": {
+        "operation": "extractFromFile",
+        "binaryPropertyName": "data"
+      }
+    },
+    {
+      "id": "w-node-3",
+      "name": "Preparar prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [560, 300],
+      "parameters": {
+        "jsCode": "const pdfText = $input.first().json.text;\n\nconst systemPrompt = `Eres un asistente experto en extraer datos de certificaciones de obra (construccion) a partir del texto extraido de un PDF.\n\nIMPORTANTE SOBRE COLORES:\n- Los numeros en color AZUL son NO revisados por el arquitecto (PENDIENTE de validar en obra)\n- Los numeros en color NEGRO ya estan REVISADOS por el arquitecto\n- El texto extraido del PDF puede incluir marcas de color. Usa tu criterio para determinar que items estan en azul vs negro.\n- Si no puedes determinar el color, asume REVISADO.\n\nEl PDF contiene una certificacion mensual con el listado de partidas ejecutadas desde el inicio de la obra.\n\nDebes extraer CADA item identificable y devolver SOLO un JSON con esta estructura:\n{\n  \"numero_certificacion\": \"Numero de certificacion si aparece (ej: 4, 01, etc)\",\n  \"proyecto\": \"Nombre del proyecto\",\n  \"contratista\": \"Nombre del contratista si aparece\",\n  \"fecha\": \"Fecha del documento\",\n  \"items\": [\n    {\n      \"codigo\": \"Codigo jerarquico (ej: 1, 1.1, 2.3.1, etc)\",\n      \"unidad\": \"Unidad de medida (Ud, M, M2, M3, ML, PA, US, %)\",\n      \"descripcion\": \"Descripcion completa de la partida\",\n      \"cantidad_acumulada\": 0.00,\n      \"precio_unitario\": 0.00,\n      \"importe\": 0.00,\n      \"revisado\": true\n    }\n  ],\n  \"total_importe\": 0.00\n}\n\nREGLAS:\n- codigo: usa el numero de partida exacto del PDF\n- unidad: normaliza a las unidades estandar (Ud, M, M2, M3, ML, PA, US, %)\n- cantidad_acumulada: es la cantidad TOTAL desde el inicio de obra (NO solo lo nuevo)\n- revisado: TRUE si el item esta en negro, FALSE si esta en azul\n- Si hay secciones/categorias (como \"MEDIOS AUXILIARES\", \"DEMOLICIONES\"), extraelas tambien como items con solo codigo y descripcion\n- Extrae TODOS los items, no omitas ninguno\n- Los numeros deben ser valores numericos, NO strings\n- Si un campo no existe, usa null`;\n\nreturn [{\n  systemPrompt,\n  pdfText\n}];"
+      }
+    },
+    {
+      "id": "w-node-4",
+      "name": "DeepSeek API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [840, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.deepseek.com/chat/completions",
+        "authentication": "none",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "deepseek-v4-flash"
+            },
+            {
+              "name": "messages",
+              "value": "={{ [\n  { role: 'system', content: $json.systemPrompt },\n  { role: 'user', content: $json.pdfText }\n] }}"
+            },
+            {
+              "name": "response_format",
+              "value": "={{ { type: 'json_object' } }}"
+            },
+            {
+              "name": "temperature",
+              "value": 0.05
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ 'Bearer ' + $env.DEEPSEEK_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "w-node-5",
+      "name": "Transformar a filas",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 300],
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body;\nconst content = JSON.parse(body.choices[0].message.content);\n\nconst rows = [];\n\n// Fila de cabecera\nconst ahora = new Date();\nrows.push({\n  A: 'CERTIFICACION',\n  B: content.numero_certificacion || '',\n  C: content.proyecto || '',\n  D: '',\n  E: '',\n  F: '',\n  G: ''\n});\nrows.push({\n  A: 'Fecha',\n  B: content.fecha || '',\n  C: '',\n  D: '',\n  E: '',\n  F: '',\n  G: ''\n});\nrows.push({}); // separador\n\n// Cabeceras de columnas\nrows.push({\n  A: 'Codigo',\n  B: 'Ud',\n  C: 'Descripcion',\n  D: 'Cant. Acum.',\n  E: 'Precio Unit.',\n  F: 'Importe',\n  G: 'Estado'\n});\n\n// Items\nif (content.items && content.items.length > 0) {\n  for (const item of content.items) {\n    rows.push({\n      A: item.codigo || '',\n      B: item.unidad || '',\n      C: item.descripcion || '',\n      D: item.cantidad_acumulada || '',\n      E: item.precio_unitario || '',\n      F: item.importe || '',\n      G: item.revisado ? 'Revisado' : 'Pendiente'\n    });\n  }\n}\n\n// Totales\nrows.push({});\nrows.push({\n  A: 'TOTAL',\n  B: '',\n  C: '',\n  D: '',\n  E: '',\n  F: content.total_importe || '',\n  G: ''\n});\n\nreturn rows;"
+      }
+    },
+    {
+      "id": "w-node-6",
+      "name": "Generar Excel",
+      "type": "n8n-nodes-base.spreadsheetFile",
+      "typeVersion": 1,
+      "position": [1400, 300],
+      "parameters": {
+        "operation": "toFile",
+        "fileFormat": "xlsx",
+        "options": {}
+      }
+    },
+    {
+      "id": "w-node-7",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1680, 300],
+      "parameters": {
+        "respondWith": "binary",
+        "binaryPropertyName": "data",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+              },
+              {
+                "name": "Content-Disposition",
+                "value": "attachment; filename=\"certificacion-extraida.xlsx\""
+              }
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Extraer PDF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extraer PDF": {
+      "main": [
+        [
+          {
+            "node": "Preparar prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Preparar prompt": {
+      "main": [
+        [
+          {
+            "node": "DeepSeek API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "DeepSeek API": {
+      "main": [
+        [
+          {
+            "node": "Transformar a filas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Transformar a filas": {
+      "main": [
+        [
+          {
+            "node": "Generar Excel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generar Excel": {
+      "main": [
+        [
+          {
+            "node": "Responder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "active": false,
+  "settings": {
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "tags": []
+}

@@ -1,0 +1,46 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: arquitek-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      - N8N_METRICS=false
+      - N8N_SKIP_WEBHOOK_DEREGISTRATION_SHUTDOWN=true
+      - N8N_PERSIST_DATA=true
+      - EXECUTIONS_DATA_PRUNE=false
+      - N8N_DEFAULT_WORKFLOW_SETTINGS={"executionOrder":"v1"}
+      - DB_TYPE=sqlite
+      - DB_SQLITE_DATABASE=/home/node/.n8n/database.sqlite
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows
+      - ./output:/output
+
+  proxy:
+    image: node:20-alpine
+    container_name: arquitek-proxy
+    restart: unless-stopped
+    ports:
+      - "3456:3456"
+    environment:
+      - PORT=3456
+      - N8N_STORAGE=/n8n-storage
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+    volumes:
+      - ./proxy-server:/app
+      - n8n_data:/n8n-storage
+      - ./output:/output
+    working_dir: /app
+    command: sh -c "npm install && node server.js"
+    depends_on:
+      - n8n
+
+volumes:
+  n8n_data:
