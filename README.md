@@ -17,7 +17,7 @@ MES 3: Certificación 2 (PDF) ────────→ + columnas Certif 02 (
 
 ### Estructura del Excel
 
-El Excel maestro tiene esta estructura, donde cada certificación añade columnas a la derecha:
+Cada certificación añade **6 columnas** a la derecha (etiqueta + 5 nombres columna). El bloque de la primera certificación empieza en la columna G:
 
 | Col | Contenido | Tipo |
 |-----|-----------|------|
@@ -27,25 +27,25 @@ El Excel maestro tiene esta estructura, donde cada certificación añade columna
 | D | Cantidad presupuestada | Fija |
 | E | Precio presupuestado | Fija |
 | F | Importe presupuestado | Fija |
-| G-L | **Certif 01**: Can, Imp, Comprobación Can/Imp, %, exceso | Azul (nueva) |
-| N-R | **Certif 02**: Can, Imp, Comprobación Can/Imp, % | Azul (nueva) |
-| U-Y | **Certif 03**: Can, Imp, Comprobación Can/Imp, % | Azul (nueva) |
-| AA-AE | **Certif 04**: Can, Imp, Comprobación Can/Imp, % | Azul (nueva) |
-| AG | COMENTARIO | Acumulativa |
-| AH | MEDIOS AUXILIARES | Acumulativa |
+| G-L | **Certif 01** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
+| M-R | **Certif 02** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
+| S-X | **Certif 03** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
+| Y-AD | **Certif 04** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
+| AE | COMENTARIO | Acumulativa |
+| AF | MEDIOS AUXILIARES | Acumulativa |
 
 Las filas pueden ser:
 - **Capítulos** (ej: `1`, `2`, `3`...) — solo contienen totales en columnas de importe.
 - **Partidas** (ej: `1.1`, `1.2`, `2.1`...) — desglose con cantidades, precio e importe.
 
-### Flujo de validación (azul → negro)
+### Flujo de validación (pendiente de formato azul)
 
-1. **Se genera el Excel** con los datos extraídos por DeepSeek. Las columnas de la nueva certificación aparecen en **azul**.
+1. **Se genera el Excel** con los datos extraídos por DeepSeek. Las columnas de la nueva certificación se añaden a la derecha.
 2. **El arquitecto revisa en obra** cada partida: verifica cantidades, precios y ejecución real.
-3. **Al volver al estudio**, cambia el formato de **azul a negro** en las celdas ya validadas.
+3. **Al volver al estudio**, actualiza el Excel manualmente (pendiente de implementar formato azul automático).
 4. Este proceso se repite cada mes con cada nueva certificación.
 
-> El azul indica "pendiente de validar en obra" — no implica error, solo que aún no se ha confirmado presencialmente.
+> ⚠️ El formato azul automático no está disponible actualmente — la librería `xlsx` Community Edition no soporta estilos. Pendiente migrar a `exceljs`.
 
 ## Implementación técnica
 
@@ -146,6 +146,15 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 - n8n 2.25.6 con workflow alternativo para certificaciones
 - Webhook en modo `onReceived`
 
+### 🔧 Últimas mejoras
+| Mejora | Descripción |
+|---|---|
+| **Parser multipart corregido** | El `endBoundary` se encontraba desde el inicio del buffer, consumiendo todas las partes en una sola. Ahora busca el siguiente delimitador con prefijo `\r\n`. |
+| **Detección OCR mejorada** | `isLikelyScanned` comprueba si el PDF contiene objetos `BT`/`ET` (texto incrustado) antes de decidir aplicar OCR, evitando OCR innecesario en PDFs con streams comprimidos pero texto real. |
+| **Emparejamiento difuso de partidas** | `matchPartida()` prueba coincidencia exacta primero, luego prefijo del código de presupuesto, luego prefijo inverso — para cuando los códigos de partida difieren ligeramente entre presupuesto y certificación. |
+| **Layout de certificación** | Cada bloque de certificación ocupa 6 columnas: etiqueta `Certif XX` + 5 nombres de columna (Can, Imp, CompCan, CompImp, %). El dropdown de selección muestra todos los archivos (base y con certificaciones). |
+| **Formato azul no disponible** | La librería `xlsx` (Community Edition) no soporta estilos de celda. Para formato azul habría que migrar a `exceljs`. |
+
 ### ⚠️ Limitaciones
 | Limitación | Detalle |
 |---|---|
@@ -153,12 +162,12 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 | **HTTP Request node POST** | Bug en typeVersion 4.2: `jsonBody` con arrays los elimina. Solución: GET con query param. |
 | **Code node sandbox** | No permite `http`, `https`, `fs`, `fetch`, `child_process`, `process.env`, `$env`, módulos npm externos. Solo `buffer`, `path`, `crypto`, `stream`, `url`, `util`, `zlib`. |
 | **Execute Command node** | No disponible en esta versión de n8n. |
+| **Sin formato azul** | La librería xlsx Community Edition no permite estilos. Pendiente migrar a exceljs. |
 
 ### 🔜 Próximos pasos
-1. Añadir formato azul a las columnas nuevas de certificación en el Excel
-2. Mejorar el emparejamiento de partidas (código exacto → fuzzy match)
-3. Header de Excel a dos filas (grupo + nombre de columna)
-4. Indicador de progreso en la interfaz web (barra de carga)
+1. Migrar a `exceljs` para formato azul en columnas nuevas de certificación
+2. Indicador de progreso en la interfaz web (barra de carga durante OCR/DeepSeek)
+3. Mejorar manejo de errores (timeouts, reintentos DeepSeek)
 
 ## Requisitos
 

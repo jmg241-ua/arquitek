@@ -30,16 +30,20 @@ function extractPdfText(pdfBuffer) {
   return (extractedText + '\n' + btEtText).trim();
 }
 
-function isLikelyScanned(text) {
+function isLikelyScanned(text, rawPdf) {
+  if (rawPdf) {
+    const hasBTET = /BT[\s\S]*?ET/.test(rawPdf.toString('binary'));
+    if (hasBTET) {
+      const alpha = (text.match(/[a-zA-ZáéíóúñüÁÉÍÓÚÑÜ]/g) || []).length;
+      const ratio = text.length > 0 ? alpha / text.length : 0;
+      if (ratio >= 0.3) return false;
+    }
+    return true;
+  }
   if (text.length < 100) return true;
   const alpha = (text.match(/[a-zA-ZáéíóúñüÁÉÍÓÚÑÜ]/g) || []).length;
   if (alpha / text.length < 0.4) return true;
-  const lines = text.split('\n').filter(l => l.trim().length > 5);
-  if (lines.length < 5) return true;
-  const words = text.split(/\s+/).filter(w => w.length > 0);
-  if (words.length === 0) return true;
-  const avgWordLen = words.reduce((s, w) => s + w.length, 0) / words.length;
-  return avgWordLen > 20;
+  return false;
 }
 
 function extractTextViaOCR(pdfPath) {
@@ -71,7 +75,7 @@ function extractTextViaOCR(pdfPath) {
 
 function readPdfFromBuffer(buffer) {
   let text = extractPdfText(buffer);
-  if (isLikelyScanned(text)) {
+  if (isLikelyScanned(text, buffer)) {
     const tmpPath = path.join(TMP_DIR, 'pdf-' + Date.now() + '.pdf');
     fs.writeFileSync(tmpPath, buffer);
     console.log('PDF parece escaneado, aplicando OCR...');
@@ -197,11 +201,15 @@ function getNextCertColumns(existingPath) {
     if (cell && String(cell.v).startsWith('Certif ')) certCount++;
   }
   const next = certCount + 1;
-  const startCol = 6 + (next - 1) * 5 + (next > 1 ? 1 : 0);
+  const startCol = 6 + (next - 1) * 6;
   return { startCol, label: 'Certif ' + String(next).padStart(2, '0') };
 }
 
-async function processCert(text) {
+async function processCert(text, budgetFileName) {
+  if (!budgetFileName) {
+    return { success: false, error: 'No hay presupuesto. Sube primero el presupuesto inicial.' };
+  }
+
   const result = await callDeepSeek([
     {
       role: "system",
@@ -225,71 +233,110 @@ async function processCert(text) {
   }
 
   const partidas = Array.isArray(data.partidas) ? data.partidas : [];
-  const budgetFileName = findLatestExcel();
+  const budgetPath = path.join(OUTPUT_DIR, budgetFileName);
 
-  if (budgetFileName) {
-    const budgetPath = path.join(OUTPUT_DIR, budgetFileName);
-    const wb = XLSX.readFile(budgetPath);
-    const ws = wb.Sheets['Presupuesto'] || wb.Sheets[wb.SheetNames[0]];
-    if (ws && ws['!ref']) {
-      const certInfo = getNextCertColumns(budgetPath);
-      const range = XLSX.utils.decode_range(ws['!ref']);
-      const colLabels = [certInfo.label, 'Can', 'Imp', 'CompCan', 'CompImp', '%'];
-      for (let i = 0; i < colLabels.length; i++) {
-        ws[XLSX.utils.encode_cell({ r: 0, c: certInfo.startCol + i })] = { t: 's', v: colLabels[i] };
-      }
-      for (let r = 1; r <= range.e.r; r++) {
-        const codigoCell = ws[XLSX.utils.encode_cell({ r: r, c: 0 })];
-        if (!codigoCell) continue;
-        const codigo = String(codigoCell.v).trim();
-        const match = partidas.find(p => String(p.codigo ?? '').trim() === codigo);
-        if (match) {
-          ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol })] = { t: 'n', v: match.can ?? 0 };
-          ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol + 1 })] = { t: 'n', v: match.imp ?? 0 };
-        }
-      }
-      if (range.e.c < certInfo.startCol + 5) {
-        range.e.c = certInfo.startCol + 5;
-        ws['!ref'] = XLSX.utils.encode_range(range);
-      }
-      const baseName = path.basename(budgetFileName, '.xlsx');
-      const newFile = saveExcel(wb, baseName);
-      return {
-        success: true,
-        tipo: 'Certificación',
-        certificacion: data.numero_certificacion || certInfo.label,
-        num_partidas: partidas.length,
-        texto_extraido: text.length + ' caracteres',
-        archivo: newFile,
-        basado_en: budgetFileName
-      };
-    }
+  if (!fs.existsSync(budgetPath)) {
+    return { success: false, error: 'Archivo de presupuesto no encontrado: ' + budgetFileName };
   }
 
-  // No budget Excel found
-  const wb = XLSX.utils.book_new();
-  const objHeaders = Object.keys(data).filter(k => k !== 'partidas');
-  const values = objHeaders.map(h => typeof data[h] === 'object' ? JSON.stringify(data[h]) : String(data[h] ?? ''));
-  const ws = XLSX.utils.aoa_to_sheet([objHeaders, values]);
-  XLSX.utils.book_append_sheet(wb, ws, 'Certificacion');
-  const fileName = saveExcel(wb, 'certificacion');
-  return { success: true, tipo: 'Certificación', archivo: fileName, num_partidas: partidas.length };
+  const wb = XLSX.readFile(budgetPath);
+  const ws = wb.Sheets['Presupuesto'] || wb.Sheets[wb.SheetNames[0]];
+  if (!ws || !ws['!ref']) {
+    return { success: false, error: 'El archivo de presupuesto no tiene datos válidos' };
+  }
+
+  const certInfo = getNextCertColumns(budgetPath);
+  const range = XLSX.utils.decode_range(ws['!ref']);
+  const sc = certInfo.startCol;
+  ws[XLSX.utils.encode_cell({ r: 0, c: sc })] = { t: 's', v: certInfo.label };
+  const colLabels = ['Can', 'Imp', 'CompCan', 'CompImp', '%'];
+  for (let i = 0; i < colLabels.length; i++) {
+    ws[XLSX.utils.encode_cell({ r: 0, c: sc + i + 1 })] = { t: 's', v: colLabels[i] };
+  }
+  for (let r = 1; r <= range.e.r; r++) {
+    const codigoCell = ws[XLSX.utils.encode_cell({ r: r, c: 0 })];
+    if (!codigoCell) continue;
+    const codigo = String(codigoCell.v).trim();
+    const match = matchPartida(codigo, partidas);
+    if (match) {
+      ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol })] = { t: 'n', v: match.can ?? 0 };
+      ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol + 1 })] = { t: 'n', v: match.imp ?? 0 };
+    }
+  }
+  if (range.e.c < certInfo.startCol + 5) {
+    range.e.c = certInfo.startCol + 5;
+  }
+  ws['!ref'] = XLSX.utils.encode_range(range);
+
+  const baseName = path.basename(budgetFileName, '.xlsx');
+  const newFile = saveExcel(wb, baseName);
+  return {
+    success: true,
+    tipo: 'Certificación',
+    certificacion: data.numero_certificacion || certInfo.label,
+    num_partidas: partidas.length,
+    texto_extraido: text.length + ' caracteres',
+    archivo: newFile,
+    basado_en: budgetFileName
+  };
+}
+
+// ─── Fuzzy partida matching ──────────────────────────────────────────────
+function matchPartida(budgetCode, partidas) {
+  const bc = String(budgetCode ?? '').trim().toLowerCase();
+  // Exact match
+  const exact = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase() === bc);
+  if (exact) return exact;
+  // Prefix match: budget "1.1" matches cert "1.1.1" if no exact match found
+  const prefix = partidas.find(p => bc.startsWith(String(p.codigo ?? '').trim().toLowerCase()));
+  if (prefix) return prefix;
+  // Reverse prefix: cert "1.1" matches budget "1.1.1"
+  const revPrefix = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase().startsWith(bc));
+  if (revPrefix) return revPrefix;
+  return null;
 }
 
 // ─── Multipart form parser ─────────────────────────────────────────────
 function parseMultipart(buffer, boundary) {
   const parts = [];
-  const blocks = buffer.toString('binary').split('--' + boundary);
-  for (const block of blocks) {
-    if (block.trim() === '' || block.trim() === '--') continue;
-    const headerEnd = block.indexOf('\r\n\r\n');
-    if (headerEnd === -1) continue;
-    const headerSection = block.substring(0, headerEnd);
+  const delimBuf = Buffer.from('\r\n--' + boundary);
+  const endDelimBuf = Buffer.from('\r\n--' + boundary + '--');
+  const doubleCRLF = Buffer.from('\r\n\r\n');
+  let searchFrom = 0;
+  while (searchFrom < buffer.length) {
+    const bIdx = buffer.indexOf(Buffer.from('--' + boundary), searchFrom);
+    if (bIdx === -1) break;
+    const blockStart = bIdx + 2 + Buffer.byteLength(boundary);
+    if (blockStart >= buffer.length) break;
+    let dataStart = blockStart;
+    if (buffer[dataStart] === 13) dataStart++;
+    if (buffer[dataStart] === 10) dataStart++;
+    const headerEnd = buffer.indexOf(doubleCRLF, dataStart);
+    if (headerEnd === -1) break;
     const contentStart = headerEnd + 4;
+    // Find next boundary (either --boundary or --boundary--)
+    const nextDelim = buffer.indexOf(delimBuf, contentStart);
+    const nextEndDelim = buffer.indexOf(endDelimBuf, contentStart);
+    let blockEnd;
+    if (nextDelim !== -1 && nextEndDelim !== -1) {
+      blockEnd = Math.min(nextDelim, nextEndDelim);
+    } else if (nextDelim !== -1) {
+      blockEnd = nextDelim;
+    } else if (nextEndDelim !== -1) {
+      blockEnd = nextEndDelim;
+    } else {
+      blockEnd = buffer.length;
+    }
+    const headerSection = buffer.slice(dataStart, headerEnd).toString('utf-8');
+    // Strip trailing \r\n before the next boundary
+    let content = buffer.slice(contentStart, blockEnd);
+    if (content.length >= 2 && content[content.length - 2] === 13 && content[content.length - 1] === 10) {
+      content = buffer.slice(contentStart, blockEnd - 2);
+    }
     const nameMatch = headerSection.match(/name="([^"]+)"/);
     const filenameMatch = headerSection.match(/filename="([^"]+)"/);
-    const content = Buffer.from(block.substring(contentStart), 'binary');
     parts.push({ name: nameMatch ? nameMatch[1] : null, filename: filenameMatch ? filenameMatch[1] : null, content });
+    searchFrom = blockEnd;
   }
   return parts;
 }
@@ -297,6 +344,13 @@ function parseMultipart(buffer, boundary) {
 // ─── HTML Interface ──────────────────────────────────────────────────────
 function serveHTML(res, message) {
   const files = fs.existsSync(OUTPUT_DIR) ? fs.readdirSync(OUTPUT_DIR).filter(f => f.endsWith('.xlsx')).sort().reverse() : [];
+  const baseFiles = files.filter(f => {
+    if (!f.startsWith('presupuesto_')) return false;
+    const base = f.replace('.xlsx', '');
+    const parts = base.split('_');
+    return parts.length === 2;
+  });
+  const hasBudget = baseFiles.length > 0;
 
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`<!DOCTYPE html>
@@ -355,10 +409,17 @@ header p { font-size: 14px; opacity: 0.7; margin-top: 4px; }
     </div>
     <div class="card">
       <h2>📋 Certificación Mensual</h2>
-      <p>Sube el PDF de la certificación del mes para añadirla al Excel.</p>
+      <p>Sube el PDF de la certificación del mes para añadirla al Excel del presupuesto.</p>
+      ${!hasBudget ? '<p style="color:#c00;font-size:13px;">⚠️ Primero sube el presupuesto inicial.</p>' : '<p style="font-size:13px;color:#666;">Selecciona el archivo de presupuesto al que añadir esta certificación.</p>'}
       <form action="/upload/cert" method="post" enctype="multipart/form-data" target="hidden-frame" onsubmit="uploading('cert')">
+        ${hasBudget ? '<select name="budgetFile" style="padding:8px;font-size:14px;border:1px solid #ccc;border-radius:6px;">' +
+          files.filter(f => f.startsWith('presupuesto_')).map(f => {
+            const isBase = f.split('_').length === 2;
+            return '<option value="' + f + '">' + (isBase ? '📄 ' : '📊 ') + f + '</option>';
+          }).join('') +
+          '</select>' : ''}
         <input type="file" name="file" accept=".pdf" required>
-        <button type="submit" id="btn-cert">Procesar Certificación</button>
+        <button type="submit" id="btn-cert" ${!hasBudget ? 'disabled' : ''}>Procesar Certificación</button>
         <span id="spinner-cert" class="loading" style="font-size:13px;color:#666;">⏳ Procesando... puede tardar 1-2 min</span>
       </form>
     </div>
@@ -418,8 +479,14 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     const text = readPdfFromFile(storagePath);
-    const result = pathname === '/budget' ? await processBudget(text) : await processCert(text);
-    res.end(JSON.stringify(result));
+    if (pathname === '/budget') {
+      const result = await processBudget(text);
+      res.end(JSON.stringify(result));
+    } else {
+      const budgetFile = parsed.query.budgetFile || findLatestExcel();
+      const result = await processCert(text, budgetFile);
+      res.end(JSON.stringify(result));
+    }
     return;
   }
 
@@ -437,7 +504,7 @@ const server = http.createServer(async (req, res) => {
     req.on('end', async () => {
       const buffer = Buffer.concat(chunks);
       const parts = parseMultipart(buffer, boundaryMatch[1]);
-      const filePart = parts.find(p => p.content.length > 0);
+      const filePart = parts.find(p => p.name === 'file');
       if (!filePart) {
         serveHTML(res, '❌ Error: no se recibió ningún archivo');
         return;
@@ -452,9 +519,11 @@ const server = http.createServer(async (req, res) => {
             ? '✅ Presupuesto procesado correctamente.<br>' + result.num_partidas + ' partidas extraídas. Archivo: ' + result.archivo
             : '❌ Error: ' + (result.error || 'desconocido');
         } else {
-          const result = await processCert(text);
+          const budgetField = parts.find(p => p.name === 'budgetFile');
+          let budgetFileName = budgetField ? budgetField.content.toString('utf-8').trim() : null;
+          const result = await processCert(text, budgetFileName);
           msg = result.success
-            ? '✅ Certificación ' + (result.certificacion || '') + ' añadida.<br>' + result.num_partidas + ' partidas. Archivo: ' + result.archivo
+            ? '<strong>✅ Certificación ' + (result.certificacion || '') + ' añadida.</strong><br>' + result.num_partidas + ' partidas. Archivo: ' + result.archivo + '<br>Basado en: ' + result.basado_en
             : '❌ Error: ' + (result.error || 'desconocido');
         }
       } catch (e) {
