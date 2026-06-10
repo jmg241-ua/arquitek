@@ -52,29 +52,37 @@ Las filas pueden ser:
 ### Arquitectura
 
 ```
-                    docker compose
-┌──────────────────────────────────────────────────────────┐
-│                                                           │
-│  ┌──────────────┐    HTTP GET     ┌──────────────────┐   │
-│  │    n8n       │ ──────────────> │    Proxy         │   │
-│  │  (5678)      │   ?binaryId=..  │  Node.js 20      │   │
-│  │              │ <────────────── │  (3456)          │   │
-│  │  Webhook →   │     JSON resp   │                  │   │
-│  │  Code →      │                 │  1. Lee PDF      │   │
-│  │  HTTP Req    │                 │  2. Extrae texto │   │
-│  └──────┬───────┘                 │  3. DeepSeek API │   │
-│         │                         │  4. Genera Excel │   │
-│         │ n8n_data volume         │  5. Guarda /output│  │
-│         ▼                         └────────┬─────────┘   │
-│  ┌──────────────┐                          │             │
-│  │  n8n storage  │   ┌─────────────┐       │ ./output    │
-│  │  (SQLite +    │   │ DeepSeek    │       ▼             │
-│  │   binary)     │   │ API (cloud) │  ┌──────────────┐  │
-│  └──────────────┘   └─────────────┘  │  ./output/    │  │
-│                                        │  certificacion│  │
-│                                        │  _*.xlsx      │  │
-│                                        └──────────────┘  │
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  Arquitecto (navegador)                                       │
+│  http://localhost:3456                                        │
+│  ┌────────────────┐   ┌──────────────────┐   ┌────────────┐ │
+│  │  Subir PDF      │   │  Ver/Descargar   │   │  Estado    │ │
+│  │  Presupuesto    │   │  Excel           │   │            │ │
+│  └───────┬────────┘   └──────────────────┘   └────────────┘ │
+└──────────┼───────────────────────────────────────────────────┘
+           │ HTTP multipart upload
+           ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Proxy Node.js 20 (puerto 3456)                              │
+│                                                              │
+│  ┌──────────────┐   ┌─────────────┐   ┌──────────────────┐ │
+│  │  /upload      │   │  /budget    │   │  /cert           │ │
+│  │  (web UI)     │   │  ?binaryId  │   │  ?binaryId       │ │
+│  └──────┬───────┘   └──────┬──────┘   └──────┬───────────┘ │
+│         │                  │                  │              │
+│         ▼                  ▼                  ▼              │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │  1. Extraer texto (raw parsing o Tesseract OCR)      │   │
+│  │  2. DeepSeek API (estructurar datos)                 │   │
+│  │  3. Generar Excel (xlsx) ← o → Añadir columnas       │   │
+│  └──────────────────────┬───────────────────────────────┘   │
+│                         │                                    │
+│                         ▼                                    │
+│                  ┌──────────────┐   ┌─────────────┐         │
+│                  │  ./output/   │   │ DeepSeek    │         │
+│                  │  *.xlsx      │   │ API (cloud) │         │
+│                  └──────────────┘   └─────────────┘         │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ```
@@ -130,13 +138,13 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 ## Estado actual
 
 ### ✅ Funcionando
-- n8n 2.25.6 en Docker con SQLite
-- Proxy server con dos endpoints:
-  - **`/budget`**: extrae presupuesto desde PDF (con OCR), crea Excel base con columnas A-F
-  - **`/cert`**: extrae certificación desde PDF, añade columnas al Excel del presupuesto existente
+- **Interfaz web** en `http://localhost:3456` — subir PDFs, ver y descargar Excel generados
+- Proxy server con endpoints `/budget` y `/cert`:
+  - **`/upload/budget`**: sube PDF, extrae texto (OCR si escaneado), llama DeepSeek, crea Excel A-F
+  - **`/upload/cert`**: sube PDF, extrae datos, añade columnas al Excel de presupuesto existente
 - Detección automática de PDFs escaneados → OCR con Tesseract (español)
-- Workflow **Certificacion PDF a Excel**: 3 nodos ejecutándose correctamente
-- Webhook en modo `onReceived` (respuesta inmediata)
+- n8n 2.25.6 con workflow alternativo para certificaciones
+- Webhook en modo `onReceived`
 
 ### ⚠️ Limitaciones
 | Limitación | Detalle |
@@ -147,10 +155,10 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 | **Execute Command node** | No disponible en esta versión de n8n. |
 
 ### 🔜 Próximos pasos
-1. Workflow de n8n para presupuesto inicial (Webhook → Code → `/budget`)
-2. Añadir formato azul a las columnas nuevas de certificación en el Excel
-3. Mejorar el emparejamiento de partidas entre certificación y presupuesto (actualmente por código exacto)
-4. Mejorar el header del Excel a dos filas (grupo de certificación + nombre de columna)
+1. Añadir formato azul a las columnas nuevas de certificación en el Excel
+2. Mejorar el emparejamiento de partidas (código exacto → fuzzy match)
+3. Header de Excel a dos filas (grupo + nombre de columna)
+4. Indicador de progreso en la interfaz web (barra de carga)
 
 ## Requisitos
 
@@ -167,28 +175,44 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 
 ## Uso
 
-### Iniciar servicios
-```bash
-docker compose up -d
-```
-Accede a `http://localhost:5678` para la interfaz de n8n.
+### Interfaz web (recomendada)
 
-### Enviar una certificación
+Abre en el navegador: **http://localhost:3456**
+
+Tres secciones simples:
+
+1. **Presupuesto Inicial** — Sube el PDF del presupuesto (GEANSAR). El proxy extrae el texto (OCR si es necesario), llama a DeepSeek, y genera el Excel base con columnas A-F (Código, Ud, Resumen, CanPres, PrPres, ImpPres). Solo la primera vez.
+
+2. **Certificación Mensual** — Sube el PDF de la certificación del mes. El proxy busca el Excel de presupuesto, extrae los datos, y **añade columnas nuevas** (Can, Imp, CompCan, CompImp, %) emparejando por código de partida.
+
+3. **Archivos Generados** — Lista todos los Excel con enlaces de descarga.
+
+La página se recarga automáticamente al terminar (1-3 min).
+
+### API directa (curl)
+
 ```bash
+# Presupuesto inicial
+curl -F "file=@presupuesto.pdf" http://localhost:3456/upload/budget
+
+# Certificación mensual
+curl -F "file=@certificacion.pdf" http://localhost:3456/upload/cert
+```
+
+### Webhooks n8n (alternativa)
+
+```bash
+curl -X POST "http://localhost:5678/webhook/budget-084049" \
+  -F "data=@presupuesto.pdf"
 curl -X POST "http://localhost:5678/webhook/cert-080640" \
-  -F "data=@ejemplo-real/CERTIFICACION Nº4 LIQUIDACION  NUEVA AVENIDA.pdf"
-```
-El Excel aparece en `./output/certificacion_*.xlsx` tras ~60s.
-
-### Script de prueba
-```bash
-./test-envio.sh ejemplo-real/CERTIFICACION_N4.pdf
+  -F "data=@certificacion.pdf"
 ```
 
 ## Notas técnicas
 
-- `executionOrder: "v1"` y `callerPolicy: "workflowsFromSameOwner"` requeridos en settings del workflow.
-- El proxy usa GET para evitar el bug de arrays en HTTP Request node.
-- Binary file path mapping: `filesystem-v2:workflows/...` → `/n8n-storage/storage/workflows/...`.
-- La API key de DeepSeek se pasa al proxy via `DEEPSEEK_API_KEY` env var en docker-compose.
-- El proxy se reconstruye automáticamente al cambiar `proxy-server/server.js` (volume mount + `npm install` en cada inicio).
+- La API key de DeepSeek se pasa al proxy via `DEEPSEEK_API_KEY` en docker-compose.
+- El proxy se construye con Dockerfile (Tesseract OCR + xlsx pre-instalados).
+- Al modificar `proxy-server/server.js`, reconstruir con `docker compose up -d --build proxy`.
+- Los PDFs se procesan directamente en el proxy (sin pasar por n8n) cuando se usa la interfaz web.
+- El endpoint `/cert` y `/upload/cert` buscan el Excel de presupuesto más reciente en `/output/` para añadir columnas.
+- `executionOrder: "v1"` y `callerPolicy: "workflowsFromSameOwner"` requeridos en workflows n8n.
