@@ -4,7 +4,7 @@ const https = require('https');
 const path = require('path');
 const url = require('url');
 const { execSync } = require('child_process');
-const XLSX = require('xlsx');
+const ExcelJS = require('exceljs');
 
 const PORT = process.env.PORT || 3456;
 const N8N_STORAGE = process.env.N8N_STORAGE || '/home/node/.n8n/storage';
@@ -126,11 +126,73 @@ function callDeepSeek(messages) {
   });
 }
 
+// ─── Excel helpers ────────────────────────────────────────────────────────
 function saveExcel(wb, prefix) {
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
   const fileName = prefix + '_' + ts + '.xlsx';
-  XLSX.writeFile(wb, path.join(OUTPUT_DIR, fileName));
-  return fileName;
+  const filePath = path.join(OUTPUT_DIR, fileName);
+  return wb.xlsx.writeFile(filePath).then(() => fileName);
+}
+
+const BLUE_FONT = { color: { argb: 'FF0070C0' } };
+const HEADER_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F0FE' } };
+
+function styleCertHeader(cell) {
+  cell.font = { ...BLUE_FONT, bold: true };
+  cell.fill = HEADER_FILL;
+  cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+}
+
+function styleCertData(cell) {
+  cell.font = BLUE_FONT;
+}
+
+function getNextCertColumns(filePath) {
+  // Returns { startCol, label } for the next certification block
+  // Each block is 6 columns: merged label (row 1) + Can, Imp, CompCan, CompImp, % (row 2)
+  return new Promise((resolve) => {
+    if (!filePath || !fs.existsSync(filePath)) {
+      return resolve({ startCol: 7, label: 'Certif 01' });
+    }
+    const wb = new ExcelJS.Workbook();
+    wb.xlsx.readFile(filePath).then(() => {
+      const ws = wb.getWorksheet('Presupuesto');
+      let certCount = 0;
+      if (ws) {
+        // Check only the label columns (col 7, 13, 19, ...) to avoid merged cell duplication
+        for (let c = 7; c <= 200; c += 6) {
+          const cell = ws.getCell(1, c);
+          const v = String(cell.value || '').trim();
+          if (v.startsWith('Certif ')) certCount++;
+          else break;
+        }
+      }
+      const next = certCount + 1;
+      const startCol = 7 + (next - 1) * 6;
+      resolve({ startCol, label: 'Certif ' + String(next).padStart(2, '0') });
+    }).catch(() => {
+      resolve({ startCol: 7, label: 'Certif 01' });
+    });
+  });
+}
+
+function findLatestExcel() {
+  if (!fs.existsSync(OUTPUT_DIR)) return null;
+  return fs.readdirSync(OUTPUT_DIR)
+    .filter(f => f.startsWith('presupuesto_') && f.endsWith('.xlsx'))
+    .sort().reverse()[0] || null;
+}
+
+// ─── Fuzzy partida matching ──────────────────────────────────────────────
+function matchPartida(budgetCode, partidas) {
+  const bc = String(budgetCode ?? '').trim().toLowerCase();
+  const exact = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase() === bc);
+  if (exact) return exact;
+  const prefix = partidas.find(p => bc.startsWith(String(p.codigo ?? '').trim().toLowerCase()));
+  if (prefix) return prefix;
+  const revPrefix = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase().startsWith(bc));
+  if (revPrefix) return revPrefix;
+  return null;
 }
 
 // ─── /budget logic ─────────────────────────────────────────────────────
@@ -160,17 +222,42 @@ async function processBudget(text) {
   }
 
   const partidas = Array.isArray(data.partidas) ? data.partidas : [];
-  const wb = XLSX.utils.book_new();
-  const headers = ['Código', 'Ud', 'Resumen', 'CanPres', 'PrPres', 'ImpPres'];
-  const wsData = [headers];
-  for (const p of partidas) {
-    wsData.push([String(p.codigo ?? ''), String(p.ud ?? ''), String(p.resumen ?? ''), p.canPres ?? 0, p.prPres ?? 0, p.impPres ?? 0]);
-  }
-  const ws = XLSX.utils.aoa_to_sheet(wsData);
-  ws['!cols'] = [{ wch: 10 }, { wch: 8 }, { wch: 55 }, { wch: 12 }, { wch: 12 }, { wch: 14 }];
-  XLSX.utils.book_append_sheet(wb, ws, 'Presupuesto');
-  const fileName = saveExcel(wb, 'presupuesto');
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Presupuesto');
 
+  // Row 1: reserved for future cert merged labels (empty)
+  // Row 2: budget headers
+  const headers = ['Código', 'Ud', 'Resumen', 'CanPres', 'PrPres', 'ImpPres'];
+  const headerRow = ws.getRow(2);
+  headerRow.values = headers;
+  headerRow.font = { bold: true };
+  headerRow.eachCell((cell) => {
+    cell.fill = HEADER_FILL;
+    cell.alignment = { horizontal: 'center', vertical: 'middle' };
+  });
+
+  // Row 3+: data
+  for (let i = 0; i < partidas.length; i++) {
+    const p = partidas[i];
+    const row = ws.getRow(i + 3);
+    row.values = [String(p.codigo ?? ''), String(p.ud ?? ''), String(p.resumen ?? ''), p.canPres ?? 0, p.prPres ?? 0, p.impPres ?? 0];
+    row.eachCell((cell, col) => {
+      if (col >= 4) cell.numFmt = '#,##0.00';
+    });
+  }
+
+  // Column widths
+  ws.getColumn(1).width = 10;
+  ws.getColumn(2).width = 8;
+  ws.getColumn(3).width = 55;
+  ws.getColumn(4).width = 12;
+  ws.getColumn(5).width = 12;
+  ws.getColumn(6).width = 14;
+
+  // Freeze panes: freeze first 6 cols (A-F) and first 2 rows
+  ws.views = [{ state: 'frozen', xSplit: 6, ySplit: 2 }];
+
+  const fileName = await saveExcel(wb, 'presupuesto');
   return {
     success: true,
     tipo: 'Presupuesto',
@@ -182,29 +269,6 @@ async function processBudget(text) {
 }
 
 // ─── /cert logic ───────────────────────────────────────────────────────
-function findLatestExcel() {
-  if (!fs.existsSync(OUTPUT_DIR)) return null;
-  return fs.readdirSync(OUTPUT_DIR)
-    .filter(f => f.startsWith('presupuesto_') && f.endsWith('.xlsx'))
-    .sort().reverse()[0] || null;
-}
-
-function getNextCertColumns(existingPath) {
-  if (!existingPath) return { startCol: 7, label: 'Certif 01' };
-  const wb = XLSX.readFile(existingPath);
-  const ws = wb.Sheets['Presupuesto'] || wb.Sheets[wb.SheetNames[0]];
-  if (!ws || !ws['!ref']) return { startCol: 7, label: 'Certif 01' };
-  const range = XLSX.utils.decode_range(ws['!ref']);
-  let certCount = 0;
-  for (let c = 6; c <= range.e.c; c++) {
-    const cell = ws[XLSX.utils.encode_cell({ r: 0, c: c })];
-    if (cell && String(cell.v).startsWith('Certif ')) certCount++;
-  }
-  const next = certCount + 1;
-  const startCol = 6 + (next - 1) * 6;
-  return { startCol, label: 'Certif ' + String(next).padStart(2, '0') };
-}
-
 async function processCert(text, budgetFileName) {
   if (!budgetFileName) {
     return { success: false, error: 'No hay presupuesto. Sube primero el presupuesto inicial.' };
@@ -239,37 +303,122 @@ async function processCert(text, budgetFileName) {
     return { success: false, error: 'Archivo de presupuesto no encontrado: ' + budgetFileName };
   }
 
-  const wb = XLSX.readFile(budgetPath);
-  const ws = wb.Sheets['Presupuesto'] || wb.Sheets[wb.SheetNames[0]];
-  if (!ws || !ws['!ref']) {
-    return { success: false, error: 'El archivo de presupuesto no tiene datos válidos' };
+  const wb = new ExcelJS.Workbook();
+  await wb.xlsx.readFile(budgetPath);
+  const ws = wb.getWorksheet('Presupuesto');
+  if (!ws) {
+    return { success: false, error: 'El archivo de presupuesto no tiene hoja válida' };
   }
 
-  const certInfo = getNextCertColumns(budgetPath);
-  const range = XLSX.utils.decode_range(ws['!ref']);
+  const certInfo = await getNextCertColumns(budgetPath);
   const sc = certInfo.startCol;
-  ws[XLSX.utils.encode_cell({ r: 0, c: sc })] = { t: 's', v: certInfo.label };
-  const colLabels = ['Can', 'Imp', 'CompCan', 'CompImp', '%'];
-  for (let i = 0; i < colLabels.length; i++) {
-    ws[XLSX.utils.encode_cell({ r: 0, c: sc + i + 1 })] = { t: 's', v: colLabels[i] };
+
+  // Detect format: old format has data starting at row 2 (exceljs row 2),
+  // new format has data starting at row 3 (exceljs row 3)
+  // Check if row 1 (exceljs) has anything (new format) or is empty (old format)
+  const row1CellA = ws.getCell(1, 1).value;
+  const isNewFormat = row1CellA === null || row1CellA === undefined || row1CellA === '';
+
+  let dataStartRow = 2; // old format: data starts at row 2
+  if (isNewFormat) {
+    dataStartRow = 3; // new format: data starts at row 3 (row 1=empty, row 2=headers)
   }
-  for (let r = 1; r <= range.e.r; r++) {
-    const codigoCell = ws[XLSX.utils.encode_cell({ r: r, c: 0 })];
-    if (!codigoCell) continue;
-    const codigo = String(codigoCell.v).trim();
-    const match = matchPartida(codigo, partidas);
-    if (match) {
-      ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol })] = { t: 'n', v: match.can ?? 0 };
-      ws[XLSX.utils.encode_cell({ r: r, c: certInfo.startCol + 1 })] = { t: 'n', v: match.imp ?? 0 };
+
+  // Row 1: merged cert label
+  // In old format, existing data is at row 2; in new format, at row 3
+  // We need to handle old format by shifting data down
+  if (!isNewFormat) {
+    // Old format: insert a row at position 2 (between header and data)
+    // Actually, old format has: row 1 = headers, row 2+ = data
+    // We need: row 1 = empty (for label), row 2 = headers, row 3+ = data
+    // So shift everything from row 2 down by 1
+    // But we need to preserve merged cells
+    // Simpler: just handle new format by checking if row 1 exists and has merged cells for certs
+    // For old format, just use the old approach (single row header)
+    // Actually, let me just use the old layout for simplicity in old files
+
+    // Old format: single row header at row 1
+    sc; // sc is correct
+    ws.getCell(1, sc).value = certInfo.label;
+    styleCertHeader(ws.getCell(1, sc));
+    // Merge label across all 6 cols  
+    ws.mergeCells(1, sc, 1, sc + 5);
+    ws.getCell(1, sc).alignment = { horizontal: 'center', vertical: 'middle' };
+    const colLabels = ['', 'Can', 'Imp', 'CompCan', 'CompImp', '%'];
+    for (let i = 0; i < colLabels.length; i++) {
+      if (colLabels[i]) {
+        const cell = ws.getCell(1, sc + i);
+        cell.value = colLabels[i];
+        styleCertHeader(cell);
+      }
+    }
+    // Data starts at row 2
+    const lastRow = ws.rowCount;
+    for (let r = 2; r <= lastRow; r++) {
+      const codigoCell = ws.getCell(r, 1);
+      if (!codigoCell.value) continue;
+      const codigo = String(codigoCell.value).trim();
+      const match = matchPartida(codigo, partidas);
+      if (match) {
+        const canCell = ws.getCell(r, sc);
+        canCell.value = match.can ?? 0;
+        styleCertData(canCell);
+        canCell.numFmt = '#,##0.00';
+        const impCell = ws.getCell(r, sc + 1);
+        impCell.value = match.imp ?? 0;
+        styleCertData(impCell);
+        impCell.numFmt = '#,##0.00';
+      }
+    }
+  } else {
+    // New format: rows 1 = reserved, 2 = headers, 3+ = data
+
+    // Row 1: merged cert label across 6 cols
+    ws.mergeCells(1, sc, 1, sc + 5);
+    const labelCell = ws.getCell(1, sc);
+    labelCell.value = certInfo.label;
+    styleCertHeader(labelCell);
+    labelCell.alignment = { horizontal: 'center', vertical: 'middle' };
+
+    // Row 2: column names (empty at sc, then Can, Imp, CompCan, CompImp, %)
+    const colLabels = ['', 'Can', 'Imp', 'CompCan', 'CompImp', '%'];
+    for (let i = 0; i < colLabels.length; i++) {
+      if (colLabels[i]) {
+        const cell = ws.getCell(2, sc + i);
+        cell.value = colLabels[i];
+        styleCertHeader(cell);
+      }
+    }
+
+    // Rows 3+: cert data values
+    const lastRow = ws.rowCount;
+    for (let r = dataStartRow; r <= lastRow; r++) {
+      const codigoCell = ws.getCell(r, 1);
+      if (!codigoCell.value) continue;
+      const codigo = String(codigoCell.value).trim();
+      const match = matchPartida(codigo, partidas);
+      if (match) {
+        const canCell = ws.getCell(r, sc);
+        canCell.value = match.can ?? 0;
+        styleCertData(canCell);
+        canCell.numFmt = '#,##0.00';
+        const impCell = ws.getCell(r, sc + 1);
+        impCell.value = match.imp ?? 0;
+        styleCertData(impCell);
+        impCell.numFmt = '#,##0.00';
+      }
     }
   }
-  if (range.e.c < certInfo.startCol + 5) {
-    range.e.c = certInfo.startCol + 5;
+
+  // Set column widths for cert columns if not set
+  for (let c = sc; c <= sc + 5; c++) {
+    if (!ws.getColumn(c).width || ws.getColumn(c).width < 12) {
+      ws.getColumn(c).width = 12;
+    }
   }
-  ws['!ref'] = XLSX.utils.encode_range(range);
 
   const baseName = path.basename(budgetFileName, '.xlsx');
-  const newFile = saveExcel(wb, baseName);
+  const newFile = await saveExcel(wb, baseName);
   return {
     success: true,
     tipo: 'Certificación',
@@ -279,21 +428,6 @@ async function processCert(text, budgetFileName) {
     archivo: newFile,
     basado_en: budgetFileName
   };
-}
-
-// ─── Fuzzy partida matching ──────────────────────────────────────────────
-function matchPartida(budgetCode, partidas) {
-  const bc = String(budgetCode ?? '').trim().toLowerCase();
-  // Exact match
-  const exact = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase() === bc);
-  if (exact) return exact;
-  // Prefix match: budget "1.1" matches cert "1.1.1" if no exact match found
-  const prefix = partidas.find(p => bc.startsWith(String(p.codigo ?? '').trim().toLowerCase()));
-  if (prefix) return prefix;
-  // Reverse prefix: cert "1.1" matches budget "1.1.1"
-  const revPrefix = partidas.find(p => String(p.codigo ?? '').trim().toLowerCase().startsWith(bc));
-  if (revPrefix) return revPrefix;
-  return null;
 }
 
 // ─── Multipart form parser ─────────────────────────────────────────────
@@ -314,7 +448,6 @@ function parseMultipart(buffer, boundary) {
     const headerEnd = buffer.indexOf(doubleCRLF, dataStart);
     if (headerEnd === -1) break;
     const contentStart = headerEnd + 4;
-    // Find next boundary (either --boundary or --boundary--)
     const nextDelim = buffer.indexOf(delimBuf, contentStart);
     const nextEndDelim = buffer.indexOf(endDelimBuf, contentStart);
     let blockEnd;
@@ -328,7 +461,6 @@ function parseMultipart(buffer, boundary) {
       blockEnd = buffer.length;
     }
     const headerSection = buffer.slice(dataStart, headerEnd).toString('utf-8');
-    // Strip trailing \r\n before the next boundary
     let content = buffer.slice(contentStart, blockEnd);
     if (content.length >= 2 && content[content.length - 2] === 13 && content[content.length - 1] === 10) {
       content = buffer.slice(contentStart, blockEnd - 2);
@@ -433,7 +565,7 @@ header p { font-size: 14px; opacity: 0.7; margin-top: 4px; }
     ${files.length > 0 ? '<table><tr><th>Archivo</th><th>Tamaño</th><th></th></tr>' + files.map(f => {
       const stats = fs.statSync(path.join(OUTPUT_DIR, f));
       const size = stats.size < 1024 ? stats.size + ' B' : (stats.size / 1024).toFixed(1) + ' KB';
-      const icon = f.startsWith('presupuesto') ? '📄' : '📊';
+      const icon = f.split('_').length === 2 ? '📄' : '📊';
       return '<tr><td>' + icon + ' <a href="/download?file=' + encodeURIComponent(f) + '">' + f + '</a></td><td>' + size + '</td></tr>';
     }).join('') + '</table>' : ''}
   </div>

@@ -27,10 +27,10 @@ Cada certificación añade **6 columnas** a la derecha (etiqueta + 5 nombres col
 | D | Cantidad presupuestada | Fija |
 | E | Precio presupuestado | Fija |
 | F | Importe presupuestado | Fija |
-| G-L | **Certif 01** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
-| M-R | **Certif 02** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
-| S-X | **Certif 03** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
-| Y-AD | **Certif 04** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Pendiente de formato azul |
+| G-L | **Certif 01** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Azul |
+| M-R | **Certif 02** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Azul |
+| S-X | **Certif 03** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Azul |
+| Y-AD | **Certif 04** (6 cols): etiqueta + Can, Imp, CompCan, CompImp, % | Azul |
 | AE | COMENTARIO | Acumulativa |
 | AF | MEDIOS AUXILIARES | Acumulativa |
 
@@ -38,14 +38,14 @@ Las filas pueden ser:
 - **Capítulos** (ej: `1`, `2`, `3`...) — solo contienen totales en columnas de importe.
 - **Partidas** (ej: `1.1`, `1.2`, `2.1`...) — desglose con cantidades, precio e importe.
 
-### Flujo de validación (pendiente de formato azul)
+### Flujo de validación (azul → negro)
 
-1. **Se genera el Excel** con los datos extraídos por DeepSeek. Las columnas de la nueva certificación se añaden a la derecha.
+1. **Se genera el Excel** con los datos extraídos por DeepSeek. Las columnas de la nueva certificación aparecen en **azul** (`#0070C0`).
 2. **El arquitecto revisa en obra** cada partida: verifica cantidades, precios y ejecución real.
-3. **Al volver al estudio**, actualiza el Excel manualmente (pendiente de implementar formato azul automático).
+3. **Al volver al estudio**, cambia el formato de **azul a negro** en las celdas ya validadas.
 4. Este proceso se repite cada mes con cada nueva certificación.
 
-> ⚠️ El formato azul automático no está disponible actualmente — la librería `xlsx` Community Edition no soporta estilos. Pendiente migrar a `exceljs`.
+> El azul indica "pendiente de validar en obra" — no implica error, solo que aún no se ha confirmado presencialmente.
 
 ## Implementación técnica
 
@@ -91,7 +91,7 @@ Las filas pueden ser:
 ├── proxy-server/
 │   ├── Dockerfile                  # Construye imagen con Tesseract OCR + xlsx
 │   ├── server.js                   # Proxy con endpoints /budget y /cert
-│   └── package.json                # xlsx
+│   └── package.json                # exceljs
 ├── workflows/
 │   ├── 01-importar-contrato.json   # Workflow contrato (pendiente)
 │   └── certificacion-pdf-a-excel.json  # Workflow certificación activo
@@ -116,7 +116,7 @@ Las filas pueden ser:
 
 ### Proxy server (`proxy-server/server.js`)
 
-Servicio Node.js 20 que corre como contenedor separado. Expone dos endpoints que reciben un `binaryId` vía query param:
+Servicio Node.js 20 que corre como contenedor separado. Usa `exceljs` para generar Excel con estilos (azul, celdas fusionadas, paneles congelados). Expone dos endpoints que reciben un `binaryId` vía query param:
 
 #### `GET /budget?binaryId=...`
 Procesa un PDF de **presupuesto** (el punto de partida de la obra):
@@ -149,11 +149,13 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 ### 🔧 Últimas mejoras
 | Mejora | Descripción |
 |---|---|
-| **Parser multipart corregido** | El `endBoundary` se encontraba desde el inicio del buffer, consumiendo todas las partes en una sola. Ahora busca el siguiente delimitador con prefijo `\r\n`. |
-| **Detección OCR mejorada** | `isLikelyScanned` comprueba si el PDF contiene objetos `BT`/`ET` (texto incrustado) antes de decidir aplicar OCR, evitando OCR innecesario en PDFs con streams comprimidos pero texto real. |
-| **Emparejamiento difuso de partidas** | `matchPartida()` prueba coincidencia exacta primero, luego prefijo del código de presupuesto, luego prefijo inverso — para cuando los códigos de partida difieren ligeramente entre presupuesto y certificación. |
-| **Layout de certificación** | Cada bloque de certificación ocupa 6 columnas: etiqueta `Certif XX` + 5 nombres de columna (Can, Imp, CompCan, CompImp, %). El dropdown de selección muestra todos los archivos (base y con certificaciones). |
-| **Formato azul no disponible** | La librería `xlsx` (Community Edition) no soporta estilos de celda. Para formato azul habría que migrar a `exceljs`. |
+| **Migración a exceljs** | Se reemplazó `xlsx` por `exceljs` para soporte de estilos: color azul, celdas fusionadas, paneles congelados. |
+| **Formato azul** | Las columnas de certificación nuevas aparecen en azul (`#0070C0`) en cabeceras (etiqueta + nombres) y datos. |
+| **Cabecera a dos filas** | Fila 1: etiqueta fusionada `Certif XX` (celda fusionada 6 columnas). Fila 2: nombres de columna (Can, Imp, CompCan, CompImp, %). |
+| **Panel congelado** | `xSplit: 6, ySplit: 2` — columnas A-F y filas 1-2 visibles siempre al desplazarse. Las columnas de certificación (G+) se desplazan independientemente. |
+| **Parser multipart corregido** | El `endBoundary` se encontraba desde el inicio del buffer, consumiendo todas las partes en una sola. Corregido. |
+| **Detección OCR mejorada** | `isLikelyScanned` comprueba objetos `BT`/`ET` antes de decidir aplicar OCR. |
+| **Emparejamiento difuso de partidas** | `matchPartida()` prueba exacto → prefijo → prefijo inverso. |
 
 ### ⚠️ Limitaciones
 | Limitación | Detalle |
@@ -162,12 +164,11 @@ Procesa un PDF de **certificación mensual** y añade columnas al Excel del pres
 | **HTTP Request node POST** | Bug en typeVersion 4.2: `jsonBody` con arrays los elimina. Solución: GET con query param. |
 | **Code node sandbox** | No permite `http`, `https`, `fs`, `fetch`, `child_process`, `process.env`, `$env`, módulos npm externos. Solo `buffer`, `path`, `crypto`, `stream`, `url`, `util`, `zlib`. |
 | **Execute Command node** | No disponible en esta versión de n8n. |
-| **Sin formato azul** | La librería xlsx Community Edition no permite estilos. Pendiente migrar a exceljs. |
 
 ### 🔜 Próximos pasos
-1. Migrar a `exceljs` para formato azul en columnas nuevas de certificación
-2. Indicador de progreso en la interfaz web (barra de carga durante OCR/DeepSeek)
-3. Mejorar manejo de errores (timeouts, reintentos DeepSeek)
+1. Indicador de progreso en la interfaz web (barra de carga durante OCR/DeepSeek)
+2. Mejorar emparejamiento de capítulos y totales
+3. Manejo de errores (timeouts, reintentos DeepSeek)
 
 ## Requisitos
 
