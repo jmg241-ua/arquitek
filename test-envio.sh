@@ -3,14 +3,14 @@ set -euo pipefail
 
 # Script de prueba: envia un PDF al webhook de certificacion y muestra el Excel generado
 # Uso: ./test-envio.sh <ruta-al-pdf>
-# Ejemplo: ./test-envio.sh ejemplo-real/CERTIFICACION_N4.pdf
+# Ejemplo: ./test-envio.sh ruta/al-certificado.pdf
 
 N8N_URL="${N8N_URL:-http://localhost:5678}"
 PDF_PATH="${1:-}"
 
 if [ -z "$PDF_PATH" ]; then
   echo "Uso: $0 <ruta-al-pdf>"
-  echo "  Ej: $0 ejemplo-real/CERTIFICACION_N4.pdf"
+  echo "  Ej: $0 ruta/al-certificado.pdf"
   exit 1
 fi
 

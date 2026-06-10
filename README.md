@@ -95,10 +95,6 @@ Las filas pueden ser:
 ├── workflows/
 │   ├── 01-importar-contrato.json   # Workflow contrato (pendiente)
 │   └── certificacion-pdf-a-excel.json  # Workflow certificación activo
-├── ejemplo-real/                   # PDFs y Excel de ejemplo
-│   ├── GEANSAR DOC-20230525-WA0005..pdf          # Presupuesto inicial (escaneado)
-│   ├── CERTIFICACION Nº4 LIQUIDACION NUEVA AVENIDA.pdf  # Certificación mensual
-│   └── NUEVA AVENIDA COMPROBACION CERT 04 v02.xlsx      # Excel esperado
 ├── test-envio.sh
 ├── output/                         # Excel generados (volumen Docker)
 └── README.md
